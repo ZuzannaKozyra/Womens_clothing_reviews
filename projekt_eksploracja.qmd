@@ -1,0 +1,232 @@
+---
+title: "Projekt z zakresu eksploracji danych"
+author: "Zuzanna Kozyra, Michał Łysakowski"
+format: 
+  html:
+    warning: false
+    message: false
+    echo: false
+    self-contained: true
+    toc: true
+    toc-location: left
+    toc-title: Spis treści
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(DT)
+library(rstatix)
+```
+
+# Cel projektu
+
+# Zbiór danych
+
+## Wczytanie danych
+
+```{r}
+dane <- read_excel('Womens Clothing Reviews Data.xlsx')
+
+datatable(dane, options = list(pageLength = 3))
+```
+
+## Opis zmiennych
+
+```{r}
+#| tbl-cap: "Opis zmiennych"
+#| label: tbl-opis
+
+opis <-  data.frame(matrix(c('Product ID', 'Numer ID produktu',
+                                'Category','Kategoria',
+
+                                'Subcategory1', 'Podkategoria pierwsza',
+
+                                'Subcategory2', 'Podkategoria druga',
+
+                                'Location', 'Lokalizacja klienta/klientki',
+
+                                'Channel', 'Sposób zamieszczenia opinii (poprzez urządzenie mobilne lub  stronę internetową)',
+
+                                'Customer Age', 'Wiek klienta/klientki w latach',
+
+                                'Review Title', 'Tytuł opinii',
+                             'Review Text', 'Treść opinii',
+                             'Rating', 'Ilość `gwiazdek` nadanych przez klienta/klientkę',
+                             'Recommend Flag', 'Czy klient/klientka rekomenduje dany produkt'),ncol = 2, byrow = T))
+
+colnames(opis) <- c("Oryginalna nazwa zmiennej", "Wyjaśnienie")
+
+kable(opis)
+```
+
+Ponieważ nie skupiamy się na konkretnych produktach, tylko głównie wpływie opinii na ilość gwiazdek i rekomendację, to kolumnę `Product ID` możemy usunąć. Zostaje dodany nowy numer ID.
+
+```{r}
+dane <- dane[,-1]
+dane <- dane %>% 
+  add_column (Id = 1: nrow(dane), .before = 1)
+```
+
+# Sprawdzanie poprawności zbioru danych
+
+## Braki danych
+
+```{r}
+dane[,-1] %>% 
+  filter(rowSums(is.na(.)) > 0) %>% 
+  datatable(options = list(pageLength = 3))
+```
+
+Powyższa tabela przedstawia wiersze, w których pojawiają się braki danych. Jest ich 3824. Występują one w kolumnach takich jak: `Category`, `Subcategory1`, `Subcategory2`, `Review Title`, `Review Text`.
+
+```{r}
+#| tbl-cap: "Braki danych w poszczególnych kolumnach"
+#| label: tbl-column_na
+
+mat <- matrix(c(sum(is.na(dane$Category)),
+sum(is.na(dane$Subcategory1)),
+sum(is.na(dane$SubCategory2)),
+sum(is.na(dane$Location)),
+sum(is.na(dane$Channel)),
+sum(is.na(dane$`Customer Age`)),
+sum(is.na(dane$`Review Title`)),
+sum(is.na(dane$`Review Text`)),
+sum(is.na(dane$Rating)),
+sum(is.na(dane$`Recommend Flag`))), ncol = 1, byrow = T)
+
+colnames(mat) <- c('Braki')
+rownames(mat) <- c('`Category`', '`Subcategory1`', '`Subcategory2`', '`Location`', '`Channel`', '`Customer Age`', '`Review Title`', '`Review Text`', '`Rating`', '`Recommend Flag`')
+
+kable(data.frame(mat))
+```
+
+Niektóre z nich są powiązane. Jeżeli braki pojawiły się w kolumnie `Category`, to są również w kolumnach `Subcategory1` oraz `Subcategory2` .
+
+```{r}
+#| tbl-cap: "Obserwacje z brakiem tytułu i opinii"
+#| label: tbl-notitle_notext
+
+dane %>% 
+  filter(is.na(`Review Title`) & is.na(`Review Text`)) %>% 
+  head() %>% 
+  kable()
+```
+
+```{r}
+#| tbl-cap: "Obserwacja z tytułem, bez opinii"
+#| label: tbl-title_notext
+
+dane %>% 
+  filter(!is.na(`Review Title`) & is.na(`Review Text`)) %>% 
+  kable()
+```
+
+Zazwyczaj gdy nie ma podanego tekstu opinii, to nie ma też jej tytułu. W tym zbiorze występuje jedna obserwacja, w której jest sam tytuł bez opinii. Jeżeli chodzi o zmienne `Review Title` oraz `Review Text`, to jest aż 2965 opinii bez nadanego tytułu. Można przypuszczać, że system, który obsługuje klientów tego sklepu pozwala na umieszczenie opinii bez nadawania tytułu.
+
+Czy usuwamy wiersze z tymi brakami??
+
+## Duplikaty
+
+```{r echo=FALSE}
+suma <- sum(duplicated(dane))
+```
+
+```{r}
+dane <- dane %>% 
+  distinct()
+```
+
+W ramce danych występują duplikaty, więc należy je usunąć.
+
+## Obserwacje odstające
+
+```{r}
+#| tbl-cap: "Kategorie zmiennych"
+#| label: tbl-factor
+
+get_unique_levels <- function(column_name) {
+  levels(factor(dane[[column_name]]))
+}
+
+unique_levels_list <- list()
+
+dane.factor <- dane %>% 
+  select(Category, Subcategory1, SubCategory2, Location, Channel, Rating, `Recommend Flag`)
+
+for (column_name in names(dane.factor)) {
+  unique_levels_list[[column_name]] <- paste(get_unique_levels(column_name), collapse = ", ")
+}
+
+unique_levels <- data.frame(t(unique_levels_list))
+
+kable(unique_levels)
+```
+
+Zmienne typu `character` zostają zamienione na `factor` (oprócz zmiennych `Review Title` oraz `Review Text`). @tbl-factor przedstawia kategorie tych zmiennych.
+
+```{r}
+dane <- dane %>% 
+  mutate_at(vars(all_of(names(dane.factor))), factor)
+```
+
+```{r}
+#| fig-cap: "Wykres pudełkowy zmiennej Customer Age"
+#| label: fig-boxplot_age
+
+dane %>% 
+  ggplot(aes(x = '', y = `Customer Age`))+
+  geom_boxplot()+
+  labs(x = "", y = "Customer Age") +
+  theme_minimal()
+```
+
+```{r}
+#| tbl-cap: "Elementy odstające" 
+#| label: tbl-outliers
+
+tbl <- dane %>% 
+  select(`Customer Age`) %>% 
+  identify_outliers() %>%
+  as.data.frame() %>% 
+  filter(is.outlier == TRUE)
+
+kable(tbl)
+```
+
+@tbl-outliers przedstawia obserwacje odstające zmiennej `Customer Age` . Tak jak widać na @fig-boxplot_age, obserwacje odstające to te, które mają bardzo dużą wartość tej zmiennej. Zostają one usunięte ze zbioru danych.
+
+```{r}
+dane <- dane %>% 
+  filter(!Id %in% tbl$Id)
+```
+
+# Obróbka tekstowa
+
+## Analiza rzeczowników
+
+## Analiza czaswoników
+
+## Analiza przymiotników
+
+## Analiza słów kluczowych
+
+# Analiza zbioru danych
+
+## Podstawowe statystyki opisowe
+
+## Korelacje
+
+## Związki między zmiennymi
+
+# Modele
+
+# Porównanie modeli
+
+# Źródła
+
+## 
