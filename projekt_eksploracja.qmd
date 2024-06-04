@@ -21,18 +21,34 @@ library(readxl)
 library(knitr)
 library(DT)
 library(rstatix)
+library(udpipe)
+library(textrank)
+library(akc)
+library(lattice)
+library(tokenizers)
+library(modeldata)
+library(tidymodels)
+library(recipes)
+library(textrecipes)
+library(ranger)
+library(moments)
 ```
 
 # Cel projektu
 
+Projekt ma na celu zbadanie wpływu słów kluczowych na ostateczną ocenę (liczbę gwiazdek) pozostawioną przez klientów. Dodatkowo przeprowadzona została analiza poszczególnych zmiennych, sprawdzenie czy zbiór nie posiada ukrytych związków między predyktorami.
+
 # Zbiór danych
+
+W zbiorze danych znajdują się informacje dotyczące zarówno klientów, ich zakupów jak i oceny danych produktów.
 
 ## Wczytanie danych
 
 ```{r}
 dane <- read_excel('Womens Clothing Reviews Data.xlsx')
+dane$Rating <- factor(dane$Rating)
 
-datatable(dane, options = list(pageLength = 3))
+datatable(dane, options = list(pageLength = 1))
 ```
 
 ## Opis zmiennych
@@ -64,10 +80,12 @@ colnames(opis) <- c("Oryginalna nazwa zmiennej", "Wyjaśnienie")
 kable(opis)
 ```
 
-Ponieważ nie skupiamy się na konkretnych produktach, tylko głównie wpływie opinii na ilość gwiazdek i rekomendację, to kolumnę `Product ID` możemy usunąć. Zostaje dodany nowy numer ID.
+Ponieważ nie skupiamy się na konkretnych produktach, tylko głównie wpływie opinii na ilość gwiazdek i rekomendację, to kolumnę `Product ID` możemy usunąć. Zostaje dodany nowy unikalny numer ID do każdej obserwacji.
+
+Usunięte zostają również kolumny `Subcategory1` oraz `Subcategory2` - ogólny podział na kategorie produktów wydaje się być wystarczający.
 
 ```{r}
-dane <- dane[,-1]
+dane <- dane[,-c(1, 3, 4)]
 dane <- dane %>% 
   add_column (Id = 1: nrow(dane), .before = 1)
 ```
@@ -82,7 +100,7 @@ dane[,-1] %>%
   datatable(options = list(pageLength = 3))
 ```
 
-Powyższa tabela przedstawia wiersze, w których pojawiają się braki danych. Jest ich 3824. Występują one w kolumnach takich jak: `Category`, `Subcategory1`, `Subcategory2`, `Review Title`, `Review Text`.
+Powyższa tabela przedstawia wiersze, w których pojawiają się braki danych. Występują one w kolumnach takich jak: `Category`, `Subcategory1`, `Subcategory2`, `Review Title`, `Review Text`.
 
 ```{r}
 #| tbl-cap: "Braki danych w poszczególnych kolumnach"
@@ -128,7 +146,11 @@ dane %>%
 
 Zazwyczaj gdy nie ma podanego tekstu opinii, to nie ma też jej tytułu. W tym zbiorze występuje jedna obserwacja, w której jest sam tytuł bez opinii. Jeżeli chodzi o zmienne `Review Title` oraz `Review Text`, to jest aż 2965 opinii bez nadanego tytułu. Można przypuszczać, że system, który obsługuje klientów tego sklepu pozwala na umieszczenie opinii bez nadawania tytułu.
 
-Czy usuwamy wiersze z tymi brakami??
+Ostatecznie obserwacje, które zawirają braki danych zostają usunięte.
+
+```{r}
+dane <- na.omit(dane)
+```
 
 ## Duplikaty
 
@@ -143,7 +165,7 @@ dane <- dane %>%
 
 W ramce danych występują duplikaty, więc należy je usunąć.
 
-## Obserwacje odstające
+## Zamiana typów zmiennych
 
 ```{r}
 #| tbl-cap: "Kategorie zmiennych"
@@ -156,7 +178,7 @@ get_unique_levels <- function(column_name) {
 unique_levels_list <- list()
 
 dane.factor <- dane %>% 
-  select(Category, Subcategory1, SubCategory2, Location, Channel, Rating, `Recommend Flag`)
+  select(Category, Location, Channel, Rating, `Recommend Flag`)
 
 for (column_name in names(dane.factor)) {
   unique_levels_list[[column_name]] <- paste(get_unique_levels(column_name), collapse = ", ")
@@ -167,21 +189,22 @@ unique_levels <- data.frame(t(unique_levels_list))
 kable(unique_levels)
 ```
 
-Zmienne typu `character` zostają zamienione na `factor` (oprócz zmiennych `Review Title` oraz `Review Text`). @tbl-factor przedstawia kategorie tych zmiennych.
+Zmienne typu *character* zostają zamienione na *factor* (oprócz zmiennych `Review Title` oraz `Review Text`). @tbl-factor przedstawia kategorie tych zmiennych.
 
 ```{r}
 dane <- dane %>% 
   mutate_at(vars(all_of(names(dane.factor))), factor)
 ```
 
+## Obserwacje odstające
+
 ```{r}
 #| fig-cap: "Wykres pudełkowy zmiennej Customer Age"
 #| label: fig-boxplot_age
 
 dane %>% 
-  ggplot(aes(x = '', y = `Customer Age`))+
+  ggplot(aes(y = `Customer Age`))+
   geom_boxplot()+
-  labs(x = "", y = "Customer Age") +
   theme_minimal()
 ```
 
@@ -195,7 +218,7 @@ tbl <- dane %>%
   as.data.frame() %>% 
   filter(is.outlier == TRUE)
 
-kable(tbl)
+head(kable(tbl))
 ```
 
 @tbl-outliers przedstawia obserwacje odstające zmiennej `Customer Age` . Tak jak widać na @fig-boxplot_age, obserwacje odstające to te, które mają bardzo dużą wartość tej zmiennej. Zostają one usunięte ze zbioru danych.
@@ -205,28 +228,389 @@ dane <- dane %>%
   filter(!Id %in% tbl$Id)
 ```
 
-# Obróbka tekstowa
+# Analiza tekstu - opinii
+
+Jednym z celów projektu jest analiza tekstu, czyli różnych opinii i tego, jak słowa, które znajdują się w tekście, wpływają na ostateczną ocenę danego produktu.
+
+```{r warning=FALSE, message=FALSE}
+ud_model <- udpipe_download_model(language = "english")
+ud_model <- udpipe_load_model(ud_model$file_model)
+x <- udpipe_annotate(ud_model, x = dane$`Review Text`)
+x <- as.data.frame(x)
+```
+
+```{r}
+stats <- txt_freq(x$upos)
+stats$key <- factor(stats$key, levels = rev(stats$key))
+barchart(key ~ freq, data = stats, col = "seagreen", 
+         main = "UPOS (Universal Parts of Speech)\n frequency of occurrence", 
+         xlab = "Freq")
+```
 
 ## Analiza rzeczowników
 
-## Analiza czaswoników
+```{r}
+stats <- subset(x, upos %in% "NOUN")
+stats <- txt_freq(x = stats$lemma)
+stats$key <- factor(stats$key, levels = rev(stats$key))
+barchart(key ~ freq, data = head(stats, 30), col = "cadetblue", main = "Most occurring nouns", xlab = "Freq")
+```
+
+## Analiza czasowników
+
+```{r}
+stats <- subset(x, upos %in% c("VERB")) 
+stats <- txt_freq(stats$token)
+stats$key <- factor(stats$key, levels = rev(stats$key))
+barchart(key ~ freq, data = head(stats, 20), col = "cadetblue", 
+         main = "Most occurring Verbs", xlab = "Freq")
+```
 
 ## Analiza przymiotników
 
+```{r}
+stats <- subset(x, upos %in% c("ADJ")) 
+stats <- txt_freq(stats$token)
+stats$key <- factor(stats$key, levels = rev(stats$key))
+barchart(key ~ freq, data = head(stats, 20), col = "cadetblue", 
+         main = "Most occurring adjectives", xlab = "Freq")
+```
+
 ## Analiza słów kluczowych
+
+```{r}
+stats <- keywords_rake(x = x, term = "lemma", group = "doc_id", 
+                       relevant = x$upos %in% c("NOUN", "ADJ"))
+stats$key <- factor(stats$keyword, levels = rev(stats$keyword))
+barchart(key ~ rake, data = head(subset(stats, freq > 3), 20), col = "cadetblue", 
+         main = "Keywords identified by RAKE", 
+         xlab = "Rake")
+```
+
+```{r}
+## Using a sequence of POS tags (noun phrases / verb phrases)
+x$phrase_tag <- as_phrasemachine(x$upos, type = "upos")
+stats <- keywords_phrases(x = x$phrase_tag, term = tolower(x$token), 
+                          pattern = "(A|N)*N(P+D*(A|N)*N)*", 
+                          is_regex = TRUE, detailed = FALSE)
+stats <- subset(stats, ngram > 1 & freq > 3)
+stats$key <- factor(stats$keyword, levels = rev(stats$keyword))
+barchart(key ~ freq, data = head(stats, 20), col = "cadetblue", 
+         main = "Keywords - simple noun phrases", xlab = "Frequency")
+```
+
+## Chmura słów
 
 # Analiza zbioru danych
 
 ## Podstawowe statystyki opisowe
 
-## Korelacje
+```{r}
+#| tbl-cap: "Podstawoe statystyki zmiennej dotyczącej wieku"
+#| label: tbl-age_stats
 
-## Związki między zmiennymi
+kable(summary(data.frame(Age = dane$`Customer Age`)))
+```
+
+```{r}
+#| fig-cap: "Histogram wieku"
+#| label: fig-hist_dens_age
+
+dane %>% 
+  ggplot(aes(`Customer Age`))+
+  geom_histogram(fill = 'cadetblue', color = 'white', bins = 20, aes(y = ..density..))+
+  geom_density(color = 'seagreen')+
+  theme_minimal()
+```
+
+```{r}
+#| tbl-cap: "Parametry zmiennej Customer Age"
+#| label: tbl-skewkurt
+
+m <- matrix(c(skewness(dane$`Customer Age`), kurtosis(dane$`Customer Age`)), nrow = 1)
+m <- data.frame(m)
+colnames(m) <- c("skośność", "kurtoza")
+kable(m)
+```
+
+Na podstawie @tbl-skewkurt oraz @fig-hist_dens_age można powiedzieć, że rozkład zmiennej `Customer Age` jest prawostronnie asymetryczny w porównaniu do rozkładu normalnego - dominują jednostki mniejsze od średniej. Kurtoza jest bliska 3, więc "szpiczastość" rozkładu jest podobna do normalnego.
+
+## Zmienna Customer Age w podziale na grupy
+
+```{r}
+#| fig-cap: "Rozkład wieku w podziale na oceny"
+#| label: fig-age_rating
+
+dane %>% 
+  ggplot(aes(y = `Customer Age`, x = Rating)) +
+  geom_boxplot()+
+  theme_minimal()
+```
+
+```{r}
+#| fig-cap: "Rozkład wieku w podziale na ostateczne polecenie produktu"
+#| label: fig-age_recommend
+
+dane %>% 
+  ggplot(aes(y = `Customer Age`, x = `Recommend Flag`)) +
+  geom_boxplot()+
+  theme_minimal()
+```
+
+```{r}
+#| fig-cap: "Rozkład wieku w podziale na sposób wykonania zakupów"
+#| label: fig-age_channel
+
+dane %>% 
+  ggplot(aes(y = `Customer Age`, x = Channel)) +
+  geom_boxplot()+
+  theme_minimal()
+```
+
+```{r}
+#| fig-cap: "Rozkład wieku w podziale na kategorie kupionych produktów"
+#| label: fig-age_category
+
+dane %>% 
+  ggplot(aes(y = `Customer Age`, x = Category)) +
+  geom_boxplot()+
+  theme_minimal()
+```
+
+Jak widać na powyższych wykresach, nie ma dużych różnic w wieku klientów w podziale na dane grupy.
+
+Jedynie @fig-age_category wykazuje minimalną różnicę - osoby młodsze dokonują częstszych zakupów w kategorii *Intimates.*
+
+## Zależności między zmiennymi jakościowymi
+
+Żeby zbadać zależności międzyz miennymi jakościowymi zostanie przeprowadzony test $\chi ^2$ o następujących hipotezach:
+
+$H_0$: dwie cechy są niezależne
+
+$H_1$: dwie cechy są zależne
+
+```{r}
+#| tbl-cap: "Badanie zależności między zmiennymi kategorycznymi"
+#| label: tbl-chisq
+
+chi_square_test_for_all_pairs <- function(data) {
+  variable_names <- names(data)
+  results <- data.frame(Zmienna1 = character(),
+                        Zmienna2 = character(),
+                        ChiSquare = numeric(),
+                        pValue = numeric(),
+                        stringsAsFactors = FALSE)
+  
+  for (i in 1:(length(variable_names) - 1)) {
+    for (j in (i + 1):length(variable_names)) {
+      table_contingency <- table(data[[variable_names[i]]], data[[variable_names[j]]])
+      test_result <- chisq.test(table_contingency)
+      results <- rbind(results, data.frame(
+        Zmienna1 = variable_names[i],
+        Zmienna2 = variable_names[j],
+        ChiSquare = as.numeric(test_result$statistic),
+        pValue = as.numeric(test_result$p.value)
+      ))
+    }
+  }
+  
+  return(results)
+}
+
+results <- dane %>%
+  select_if(is.factor) %>%
+  chi_square_test_for_all_pairs()
+
+kable(results)
+```
+
+@tbl-chisq przedstawia wyniki testu $\chi ^2$. Na podstawie wyników można stwierdzić, że pary zmiennych:
+
+-   `Category` i `Rating`
+
+-   `Category` i `Recommend Flag`
+
+-   `Rating` i `Recommend Flag`
+
+są zależne - dla tych par wartość $p < 0.05$, więc $H_0$ zostaje odrzucona, a przyjęta $H_1$.
+
+Dla pozostałych połączeń zmiennych nie ma podstaw do odrzucenia $H_0$ - można przypuszczać, że nie są zależne.
 
 # Modele
+
+## Drzewo decyzyjne
+
+```{r}
+split <- initial_split(dane, strata = Rating)
+train <- training(split)
+test <- testing(split)
+```
+
+```{r}
+train_folds <- vfold_cv(train)
+```
+
+```{r}
+set.seed(2024)
+library(recipes)
+library(workflowsets)
+library(rpart)
+library(tidymodels)
+
+library(recipes)
+library(workflowsets)
+library(rpart)
+library(tidymodels)
+
+
+dane_rec <- recipe(Rating ~ `Review Text`, data = train) %>%
+  step_tokenize(`Review Text`) %>%
+  step_tokenfilter(`Review Text`, max_tokens = 1000) %>%
+  step_tf(`Review Text`) %>%
+  step_normalize(all_predictors())
+
+
+dt_model <- decision_tree() %>%  
+  set_engine("rpart") %>% 
+  set_mode("classification")
+
+
+dt_wflow <- workflow() %>%  
+  add_model(dt_model) %>% 
+  add_recipe(dane_rec)
+
+
+dt_fit <- fit(dt_wflow, data = train)
+
+predictions <- predict(dt_fit, new_data = test)
+```
+
+```{r}
+actual <- test$Rating
+predicted <- predictions$.pred_class
+
+conf_matrix <- table(actual, predicted)
+conf_matrix
+```
+
+```{r}
+dt_tune <- decision_tree(cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune()) %>%  
+  set_engine("rpart") %>% 
+  set_mode("classification")
+```
+
+```{r}
+dt_param <- extract_parameter_set_dials(dt_tune)
+dt_param <- finalize(dt_param, train)
+```
+
+```{r}
+dt_tune_wflow <- workflow() %>% 
+  add_model(dt_tune) %>% 
+  add_recipe(dane_rec)
+```
+
+```{r}
+roc_res <- metric_set(roc_auc)
+
+grid <- grid_latin_hypercube(dt_param)
+
+dt_tune <-
+  dt_tune_wflow %>%
+  tune_grid(
+    train_folds,
+    grid = grid,
+    metrics = roc_res
+  )
+```
+
+```{r}
+show_best(dt_tune)
+select_best(dt_tune, metric = 'roc_auc')
+```
+
+```{r}
+dt2_model <- decision_tree(tree_depth = 14, min_n = 31, cost_complexity = 7.26e-10) %>%  
+  set_engine("rpart") %>% 
+  set_mode("classification")
+
+
+dt2_wflow <- workflow() %>%  
+  add_model(dt2_model) %>% 
+  add_recipe(dane_rec)
+
+
+dt2_fit <- fit(dt2_wflow, data = train)
+
+predictions2 <- predict(dt2_fit, new_data = test)
+
+actual2 <- test$Rating
+predicted2 <- predictions2$.pred_class
+
+conf_matrix2 <- table(actual2, predicted2)
+conf_matrix2
+```
+
+```{r}
+accuracy(conf_matrix2)
+```
+
+przerobic to na tak jak jest w 8 labie
+
+## Las losowy
+
+## Boosting
+
+## SVM
+
+## kNN
+
+## Sieć neuronowa
+
+```{r}
+library(keras3)
+library(tensorflow)
+
+x_train <- train %>% select(-Rating)
+y_train <- train$Rating
+x_test <- test %>% select(-Rating)
+y_test <- test$Rating
+ 
+ 
+rnn <- keras_model_sequential() %>%
+  layer_embedding(input_dim = 10, output_dim = 5) %>%
+  layer_simple_rnn(units = 5, dropout = 0.4, recurrent_dropout = 0.4) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+```
+
+```{r}
+rnn %>% compile( 
+  optimizer = "adam", 
+  loss = "binary_crossentropy", 
+  metrics = c("accuracy") 
+)
+ 
+ 
+history <- rnn %>% fit( 
+  x_train,y_train, 
+  epochs = 10, 
+  batch_size = 32, 
+  validation_split = 0.2 
+)
+ 
+
+```
+
+```{r}
+model %>% evaluate(x_test,y_test)
+```
 
 # Porównanie modeli
 
 # Źródła
+
+<https://www.kaggle.com/datasets/rishikumarrajvansh/womens-clothing-reviews-data>
 
 ## 
