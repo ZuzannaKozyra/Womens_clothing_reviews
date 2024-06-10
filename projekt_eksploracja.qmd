@@ -32,17 +32,21 @@ library(recipes)
 library(textrecipes)
 library(ranger)
 library(moments)
+library(doParallel)
+library(tm)
 ```
 
 # Cel projektu
 
-Projekt ma na celu zbadanie wpływu słów kluczowych na ostateczną ocenę (liczbę gwiazdek) pozostawioną przez klientów. Dodatkowo przeprowadzona została analiza poszczególnych zmiennych, sprawdzenie czy zbiór nie posiada ukrytych związków między predyktorami.
+Projekt ma na celu zbadanie wpływu słów kluczowych używanych w opiniach na ostateczną ocenę (liczbę gwiazdek) i rekomendację danego produktu pozostawioną przez klientów. Dodatkowo przeprowadzona została analiza poszczególnych zmiennych oraz sprawdzenie czy zbiór nie posiada ukrytych związków między predyktorami.
 
 # Zbiór danych
 
 W zbiorze danych znajdują się informacje dotyczące zarówno klientów, ich zakupów jak i oceny danych produktów.
 
 ## Wczytanie danych
+
+Poniższa tabela prezentuje część zbioru danych.
 
 ```{r}
 dane <- read_excel('Womens Clothing Reviews Data.xlsx')
@@ -72,7 +76,7 @@ opis <-  data.frame(matrix(c('Product ID', 'Numer ID produktu',
 
                                 'Review Title', 'Tytuł opinii',
                              'Review Text', 'Treść opinii',
-                             'Rating', 'Ilość `gwiazdek` nadanych przez klienta/klientkę',
+                             'Rating', 'Ilość gwiazdek nadanych przez klienta/klientkę',
                              'Recommend Flag', 'Czy klient/klientka rekomenduje dany produkt'),ncol = 2, byrow = T))
 
 colnames(opis) <- c("Oryginalna nazwa zmiennej", "Wyjaśnienie")
@@ -80,7 +84,7 @@ colnames(opis) <- c("Oryginalna nazwa zmiennej", "Wyjaśnienie")
 kable(opis)
 ```
 
-Ponieważ nie skupiamy się na konkretnych produktach, tylko głównie wpływie opinii na ilość gwiazdek i rekomendację, to kolumnę `Product ID` możemy usunąć. Zostaje dodany nowy unikalny numer ID do każdej obserwacji.
+Ponieważ nie skupiamy się na konkretnych produktach, tylko głównie na wpływie opinii na ilość gwiazdek i rekomendację, to kolumnę `Product ID` możemy usunąć. Zostaje dodany nowy unikalny numer ID do każdej obserwacji.
 
 Usunięte zostają również kolumny `Subcategory1` oraz `Subcategory2` - ogólny podział na kategorie produktów wydaje się być wystarczający.
 
@@ -97,18 +101,16 @@ dane <- dane %>%
 ```{r}
 dane[,-1] %>% 
   filter(rowSums(is.na(.)) > 0) %>% 
-  datatable(options = list(pageLength = 3))
+  datatable(options = list(pageLength = 1))
 ```
 
-Powyższa tabela przedstawia wiersze, w których pojawiają się braki danych. Występują one w kolumnach takich jak: `Category`, `Subcategory1`, `Subcategory2`, `Review Title`, `Review Text`.
+Powyższa tabela przedstawia wiersze, w których pojawiają się braki danych. Występują one w kolumnach takich jak: `Category`, `Review Title`, `Review Text`.
 
 ```{r}
 #| tbl-cap: "Braki danych w poszczególnych kolumnach"
 #| label: tbl-column_na
 
 mat <- matrix(c(sum(is.na(dane$Category)),
-sum(is.na(dane$Subcategory1)),
-sum(is.na(dane$SubCategory2)),
 sum(is.na(dane$Location)),
 sum(is.na(dane$Channel)),
 sum(is.na(dane$`Customer Age`)),
@@ -118,12 +120,10 @@ sum(is.na(dane$Rating)),
 sum(is.na(dane$`Recommend Flag`))), ncol = 1, byrow = T)
 
 colnames(mat) <- c('Braki')
-rownames(mat) <- c('`Category`', '`Subcategory1`', '`Subcategory2`', '`Location`', '`Channel`', '`Customer Age`', '`Review Title`', '`Review Text`', '`Rating`', '`Recommend Flag`')
+rownames(mat) <- c('`Category`', '`Location`', '`Channel`', '`Customer Age`', '`Review Title`', '`Review Text`', '`Rating`', '`Recommend Flag`')
 
 kable(data.frame(mat))
 ```
-
-Niektóre z nich są powiązane. Jeżeli braki pojawiły się w kolumnie `Category`, to są również w kolumnach `Subcategory1` oraz `Subcategory2` .
 
 ```{r}
 #| tbl-cap: "Obserwacje z brakiem tytułu i opinii"
@@ -146,7 +146,7 @@ dane %>%
 
 Zazwyczaj gdy nie ma podanego tekstu opinii, to nie ma też jej tytułu. W tym zbiorze występuje jedna obserwacja, w której jest sam tytuł bez opinii. Jeżeli chodzi o zmienne `Review Title` oraz `Review Text`, to jest aż 2965 opinii bez nadanego tytułu. Można przypuszczać, że system, który obsługuje klientów tego sklepu pozwala na umieszczenie opinii bez nadawania tytułu.
 
-Ostatecznie obserwacje, które zawirają braki danych zostają usunięte.
+Ostatecznie, obserwacje, które zawierają braki danych zostają usunięte, ponieważ nie będą przydatne.
 
 ```{r}
 dane <- na.omit(dane)
@@ -158,12 +158,7 @@ dane <- na.omit(dane)
 suma <- sum(duplicated(dane))
 ```
 
-```{r}
-dane <- dane %>% 
-  distinct()
-```
-
-W ramce danych występują duplikaty, więc należy je usunąć.
+W ramce danych nie występują duplikaty.
 
 ## Zamiana typów zmiennych
 
@@ -209,19 +204,14 @@ dane %>%
 ```
 
 ```{r}
-#| tbl-cap: "Elementy odstające" 
-#| label: tbl-outliers
-
 tbl <- dane %>% 
   select(`Customer Age`) %>% 
   identify_outliers() %>%
   as.data.frame() %>% 
   filter(is.outlier == TRUE)
-
-head(kable(tbl))
 ```
 
-@tbl-outliers przedstawia obserwacje odstające zmiennej `Customer Age` . Tak jak widać na @fig-boxplot_age, obserwacje odstające to te, które mają bardzo dużą wartość tej zmiennej. Zostają one usunięte ze zbioru danych.
+Tak jak widać na @fig-boxplot_age, obserwacje odstające zmiennej `Customer Age` to te, które mają bardzo dużą wartość tej zmiennej. Zostają one usunięte ze zbioru danych.
 
 ```{r}
 dane <- dane %>% 
@@ -230,7 +220,7 @@ dane <- dane %>%
 
 # Analiza tekstu - opinii
 
-Jednym z celów projektu jest analiza tekstu, czyli różnych opinii i tego, jak słowa, które znajdują się w tekście, wpływają na ostateczną ocenę danego produktu.
+Jednym z celów projektu jest analiza tekstu, czyli różnych opinii i tego, jak słowa, które znajdują się w tekście, wpływają na ostateczną ocenę danego produktu. Zanim przejdziemy do modelowania, warto spojrzeć jakie wyrażenia pojawiają się w opiniach najczęściej. Można również sprawdzić najpopularniejsze słowa w podziale na części mowy takie jak: rzeczowniki, czasowniki, przymiotniki. W tym przypadku wykorzystywany jest model języka angielskiego, bo w takim napisane są opinie.
 
 ```{r warning=FALSE, message=FALSE}
 ud_model <- udpipe_download_model(language = "english")
@@ -247,6 +237,8 @@ barchart(key ~ freq, data = stats, col = "seagreen",
          xlab = "Freq")
 ```
 
+Najczęściej pojawiają się rzeczowniki, a zaraz po nich znaki interpunkcyjne.
+
 ## Analiza rzeczowników
 
 ```{r}
@@ -255,6 +247,8 @@ stats <- txt_freq(x = stats$lemma)
 stats$key <- factor(stats$key, levels = rev(stats$key))
 barchart(key ~ freq, data = head(stats, 30), col = "cadetblue", main = "Most occurring nouns", xlab = "Freq")
 ```
+
+Można założyć, że najczęściej klinetki kupują sukienki, bo wspominają o nich w opiniach wielokrotnie. Podczas oceniania produktów często odnoszą się do rozmiaru danego ubrania.
 
 ## Analiza czasowników
 
@@ -265,6 +259,8 @@ stats$key <- factor(stats$key, levels = rev(stats$key))
 barchart(key ~ freq, data = head(stats, 20), col = "cadetblue", 
          main = "Most occurring Verbs", xlab = "Freq")
 ```
+
+Powyższy wykres przedstawia czasowniki, które są najchętniej używane podczas oceniania produktów.
 
 ## Analiza przymiotników
 
@@ -287,6 +283,8 @@ barchart(key ~ rake, data = head(subset(stats, freq > 3), 20), col = "cadetblue"
          xlab = "Rake")
 ```
 
+Powyższy wykres identyfikuje słowa kluczowe za pomocą algorytmu RAKE (Rapid Automatic Keyword Extraction). Jego algorytm dzieli tekst na frazy kandydatów, używając stop - words (np. the, is, an) jako delimiterów ("oddzielaczy"), a następnie ocenia te frazy na podstawie częstotliwości współwystępowania słów. Na końcu wybiera określoną liczbę najistotniejszych słów kluczowych lub fraz, które najlepiej reprezentują zawartość tekstu.
+
 ```{r}
 ## Using a sequence of POS tags (noun phrases / verb phrases)
 x$phrase_tag <- as_phrasemachine(x$upos, type = "upos")
@@ -299,17 +297,37 @@ barchart(key ~ freq, data = head(stats, 20), col = "cadetblue",
          main = "Keywords - simple noun phrases", xlab = "Frequency")
 ```
 
-## Chmura słów
+Dla porównania z algorytmem RAKE, powyższy wykres bada częstotliwość fraz, ale prostą metodą wyrażeń z rzeczownikami i czasownikami. Widać, że pokazuje całkowicie inne wyniki niż poprzednia wizualizacja.
+
+## Word cloud
+
+Word cloud to jedno z narzędzi wizualizacji, które pozwala na przejrzyste przedstawienie najczęściej pojawiających się sformułowań użytych w tekście.
+
+```{r}
+library(wordcloud)
+
+stats <- merge(x, x, 
+           by.x = c("doc_id", "paragraph_id", "sentence_id", "head_token_id"),
+           by.y = c("doc_id", "paragraph_id", "sentence_id", "token_id"),
+           all.x = TRUE, all.y = FALSE, 
+           suffixes = c("", "_parent"), sort = FALSE)
+stats <- subset(stats, dep_rel %in% "nsubj" & upos %in% c("NOUN") & upos_parent %in% c("ADJ"))
+stats$term <- paste(stats$lemma_parent, stats$lemma, sep = " ")
+stats <- txt_freq(stats$term)
+
+wordcloud(words = stats$key, freq = stats$freq, min.freq = 3, max.words = 100,
+          random.order = FALSE, colors = brewer.pal(6, "Dark2"))
+```
 
 # Analiza zbioru danych
 
 ## Podstawowe statystyki opisowe
 
 ```{r}
-#| tbl-cap: "Podstawoe statystyki zmiennej dotyczącej wieku"
+#| tbl-cap: "Podstawowe statystyki zmiennej dotyczącej wieku"
 #| label: tbl-age_stats
 
-kable(summary(data.frame(Age = dane$`Customer Age`)))
+kable(summary(data.frame(Age = dane$`Customer Age`)), align = "c")
 ```
 
 ```{r}
@@ -333,7 +351,7 @@ colnames(m) <- c("skośność", "kurtoza")
 kable(m)
 ```
 
-Na podstawie @tbl-skewkurt oraz @fig-hist_dens_age można powiedzieć, że rozkład zmiennej `Customer Age` jest prawostronnie asymetryczny w porównaniu do rozkładu normalnego - dominują jednostki mniejsze od średniej. Kurtoza jest bliska 3, więc "szpiczastość" rozkładu jest podobna do normalnego.
+Na podstawie @tbl-skewkurt oraz @fig-hist_dens_age można powiedzieć, że rozkład zmiennej `Customer Age` jest prawostronnie asymetryczny w porównaniu do rozkładu normalnego - dominują jednostki mniejsze od średniej. Kurtoza jest bliska wartości 3, więc "szpiczastość" rozkładu jest podobna do normalnego.
 
 ## Zmienna Customer Age w podziale na grupy
 
@@ -381,9 +399,115 @@ Jak widać na powyższych wykresach, nie ma dużych różnic w wieku klientów w
 
 Jedynie @fig-age_category wykazuje minimalną różnicę - osoby młodsze dokonują częstszych zakupów w kategorii *Intimates.*
 
+## Liczba obserwacji w danych grupach
+
+Przed przystąpieniem do budowy modeli warto również sprawdzić jak obserwacje rozkładają się między kategoriami danych zmiennych jakościowych.
+
+```{r}
+#| tbl-cap: "Liczba obserwacji w grupach zmiennej Category"
+
+dane %>% 
+  group_by(Category) %>% 
+  count() %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Wykres słupkowy zliczający obserwacje w grupach zmiennej Category"
+
+dane %>% 
+  ggplot(aes(x = Category))+
+  geom_bar(fill = "steelblue")+
+  theme_minimal()
+```
+
+W kategorii *General* jest ponad połowa obserwacji, najmniej zakupów było dokonanych w kategorii *Intimates*.
+
+```{r}
+#| tbl-cap: "Liczba obserwacji w grupach zmiennej Location"
+
+dane %>% 
+  group_by(Location) %>% 
+  count() %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Wykres słupkowy zliczający obserwacje w grupach zmiennej Location"
+
+dane %>% 
+  ggplot(aes(x = Location))+
+  geom_bar(fill = "steelblue")+
+  theme_minimal()
+```
+
+Najmniej zakupów było dokonanych z lokalizacji Chennai, a najwięcej z Gurgaon.
+
+```{r}
+#| tbl-cap: "Liczba obserwacji w grupach zmiennej Channel"
+
+dane %>% 
+  group_by(Channel) %>% 
+  count() %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Wykres słupkowy zliczający obserwacje w grupach zmiennej Channel"
+
+dane %>% 
+  ggplot(aes(x = Channel))+
+  geom_bar(fill = "steelblue")+
+  theme_minimal()
+```
+
+O wiele częściej zakupy były dokonywane poprzez stronę internetową. Klienci rzadziej sięgają po aplikacje mobilne w celach zakupowych.
+
+```{r}
+#| tbl-cap: "Liczba obserwacji w grupach zmiennej Rating"
+
+dane %>% 
+  group_by(Rating) %>% 
+  count() %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Wykres słupkowy zliczający obserwacje w grupach zmiennej Rating"
+
+dane %>% 
+  ggplot(aes(x = Rating))+
+  geom_bar(fill = "steelblue")+
+  theme_minimal()
+```
+
+Znaczną większość stanowi liczba pięciu gwiazdek, które klienci zostawiają w opiniach - przeważają produkty, które zadowalają klientów.
+
+```{r}
+#| tbl-cap: "Liczba obserwacji w grupach zmiennej Recommend Flag"
+
+dane %>% 
+  group_by(`Recommend Flag`) %>% 
+  count() %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Wykres słupkowy zliczający obserwacje w grupach zmiennej Recommend Flag"
+
+dane %>% 
+  ggplot(aes(x = `Recommend Flag`))+
+  geom_bar(fill = "steelblue")+
+  theme_minimal()
+```
+
+Prawie trzy razy częściej klienci polecają dany produkt niż go nie polecają - są zadowoleni z zakupionych produktów.
+
+Widać, że obserwacje podzielone na kategorie każdej zmiennej jakościowej nie tworzą zbalansowanych rozkładów.
+
 ## Zależności między zmiennymi jakościowymi
 
-Żeby zbadać zależności międzyz miennymi jakościowymi zostanie przeprowadzony test $\chi ^2$ o następujących hipotezach:
+Żeby zbadać zależności między zmiennymi jakościowymi zostanie przeprowadzony test $\chi ^2$ o następujących hipotezach:
 
 $H_0$: dwie cechy są niezależne
 
@@ -436,22 +560,30 @@ są zależne - dla tych par wartość $p < 0.05$, więc $H_0$ zostaje odrzucona,
 
 Dla pozostałych połączeń zmiennych nie ma podstaw do odrzucenia $H_0$ - można przypuszczać, że nie są zależne.
 
-# Modele
+# Modele - zmienna przewidywana Rating
 
-## Drzewo decyzyjne
+Na wstępie z danych zostają wylosowane 3000 obserwacji i podzielone na zbiór uczący oraz testowy (gdyby możliwości sprzętowe i czasowe pozwoliły, to modele uczyłyby się na całym zbiorze danych). Zmienna objaśniana w podziale obserwacji na grupy nie jest zbalansowana, więc zostało zastosowane losowanie warstwowe względem tej zmiennej. Do budowy i poszukiwania najbardziej optymalnych parametrów w każdym modelu wykorzystywana jest 5 - krotna walidacja krzyżowa według zmiennej `Rating` i przeszukiwanie siatki z wykorzystaniem hipersześcianów łacińskich.
+
+Przygotowanie zmiennej tekstowej odbywa się w funkcji *recipe* - tokenizacja, usunięcie zbędnych słów i filtracja tekstu.
+
+Badany jest wpływ zmiennej `Review Text` na `Rating`.
+
+Parametry każdego modelu wybierane są na podstawie jak najlepszych wartości pola pod wykresem krzywej ROC.
 
 ```{r}
-split <- initial_split(dane, strata = Rating)
+set.seed(2024)
+dane_modele = sample_n(dane, 3000)
+split <- initial_split(dane_modele, strata = Rating)
 train <- training(split)
 test <- testing(split)
 ```
 
 ```{r}
-train_folds <- vfold_cv(train)
+res <- vfold_cv(train, v = 5, strata = Rating)
+m <- metric_set(f_meas, roc_auc, accuracy)
 ```
 
 ```{r}
-set.seed(2024)
 library(recipes)
 library(workflowsets)
 library(rpart)
@@ -465,36 +597,16 @@ library(tidymodels)
 
 dane_rec <- recipe(Rating ~ `Review Text`, data = train) %>%
   step_tokenize(`Review Text`) %>%
+  step_stopwords(`Review Text`, stopword_source = "stopwords-iso") %>%
   step_tokenfilter(`Review Text`, max_tokens = 1000) %>%
   step_tf(`Review Text`) %>%
   step_normalize(all_predictors())
-
-
-dt_model <- decision_tree() %>%  
-  set_engine("rpart") %>% 
-  set_mode("classification")
-
-
-dt_wflow <- workflow() %>%  
-  add_model(dt_model) %>% 
-  add_recipe(dane_rec)
-
-
-dt_fit <- fit(dt_wflow, data = train)
-
-predictions <- predict(dt_fit, new_data = test)
 ```
 
-```{r}
-actual <- test$Rating
-predicted <- predictions$.pred_class
-
-conf_matrix <- table(actual, predicted)
-conf_matrix
-```
+## Drzewo decyzyjne
 
 ```{r}
-dt_tune <- decision_tree(cost_complexity = tune(),
+dt <- decision_tree(cost_complexity = tune(),
   tree_depth = tune(),
   min_n = tune()) %>%  
   set_engine("rpart") %>% 
@@ -502,112 +614,871 @@ dt_tune <- decision_tree(cost_complexity = tune(),
 ```
 
 ```{r}
-dt_param <- extract_parameter_set_dials(dt_tune)
+dt_param <- extract_parameter_set_dials(dt)
 dt_param <- finalize(dt_param, train)
 ```
 
 ```{r}
-dt_tune_wflow <- workflow() %>% 
-  add_model(dt_tune) %>% 
-  add_recipe(dane_rec)
-```
-
-```{r}
-roc_res <- metric_set(roc_auc)
-
-grid <- grid_latin_hypercube(dt_param)
-
-dt_tune <-
-  dt_tune_wflow %>%
-  tune_grid(
-    train_folds,
-    grid = grid,
-    metrics = roc_res
-  )
-```
-
-```{r}
-show_best(dt_tune)
-select_best(dt_tune, metric = 'roc_auc')
-```
-
-```{r}
-dt2_model <- decision_tree(tree_depth = 14, min_n = 31, cost_complexity = 7.26e-10) %>%  
-  set_engine("rpart") %>% 
-  set_mode("classification")
-
-
-dt2_wflow <- workflow() %>%  
-  add_model(dt2_model) %>% 
+dt_wf <- workflow() %>% 
+  add_model(dt) %>% 
   add_recipe(dane_rec)
 
-
-dt2_fit <- fit(dt2_wflow, data = train)
-
-predictions2 <- predict(dt2_fit, new_data = test)
-
-actual2 <- test$Rating
-predicted2 <- predictions2$.pred_class
-
-conf_matrix2 <- table(actual2, predicted2)
-conf_matrix2
+grid_dt <- grid_latin_hypercube(dt_param)
 ```
 
 ```{r}
-accuracy(conf_matrix2)
+registerDoParallel(cores = 4)
+
+dt_res <- dt_wf %>% 
+  tune_grid(resamples = res,
+            grid = grid_dt,
+            metrics = m)
 ```
 
-przerobic to na tak jak jest w 8 labie
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla drzewa decyzyjnego"
+#| label: tbl-dt_best
+
+dt_res %>% 
+  show_best("roc_auc") %>% 
+  kable()
+
+dt_best_param <- select_best(dt_res, "roc_auc")
+```
+
+```{r}
+dt_final <- dt_wf %>% 
+  finalize_workflow(dt_best_param)
+
+dt_fit <- dt_final %>% 
+  fit(data = train)
+
+pred_dt <- predict(dt_fit, new_data = test)
+pred_dt2 <- cbind(test, pred_dt)
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla drzewa decyzyjnego"
+#| label: fig-conf_mat_dt
+
+pred_dt2 %>%
+  conf_mat(truth = Rating, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC w podziale na klasy - drzewo decyzyjne"
+#| label: fig-roc_dt
+
+pred_dt_prob <- predict(dt_fit, new_data = test, type = "prob")
+pred_dt2_prob <- cbind(test, pred_dt_prob)
+
+pred_dt2_prob %>%
+  roc_curve(truth = Rating, .pred_1:.pred_5) %>% 
+  autoplot()+
+  theme_minimal()
+```
 
 ## Las losowy
 
+```{r}
+rf <- rand_forest(mtry = tune(),
+                  trees = tune(),
+                  min_n = tune()) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger")
+
+rf_param <- extract_parameter_set_dials(rf)
+rf_param <- finalize(rf_param, train)
+
+rf_wf <- workflow() %>% 
+  add_model(rf) %>% 
+  add_recipe(dane_rec)
+
+grid_rf <- grid_latin_hypercube(rf_param)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+rf_res <- rf_wf %>% 
+  tune_grid(resamples = res,
+            grid = grid_rf,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla lasu losowego"
+#| label: tbl-rf_best
+
+rf_res %>% 
+  show_best("roc_auc") %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla lasu losowego"
+#| label: fig-conf_mat_rf
+
+rf_best_param <- select_best(rf_res, "roc_auc")
+
+rf_final <- rf_wf %>% 
+  finalize_workflow(rf_best_param)
+
+rf_fit <- rf_final %>% 
+  fit(data = train)
+
+pred_rf <- predict(rf_fit, new_data = test)
+
+pred_rf2 <- cbind(test, pred_rf)
+
+pred_rf2 %>%
+  conf_mat(truth = Rating, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC w podziale na klasy - las losowy"
+#| label: fig-roc_rf
+
+pred_rf_prob <- predict(rf_fit, new_data = test, type = "prob")
+pred_rf2_prob <- cbind(test, pred_rf_prob)
+
+pred_rf2_prob %>%
+  roc_curve(truth = Rating, .pred_1:.pred_5) %>% 
+  autoplot()+
+  theme_minimal()
+```
+
 ## Boosting
 
-## SVM
+```{r}
+xgb <- boost_tree(trees = tune(),
+                  min_n = tune(),
+                  tree_depth = tune(),
+                  learn_rate = tune(),
+                  loss_reduction = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+xgb_param <- extract_parameter_set_dials(xgb)
+xgb_param <- finalize(xgb_param, train)
+
+xgb_wf <- workflow() %>% 
+  add_model(xgb) %>% 
+  add_recipe(dane_rec)
+
+grid_xgb <- grid_latin_hypercube(xgb_param)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+xgb_res <- xgb_wf %>% 
+  tune_grid(resamples = res,
+            grid = grid_xgb,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla XGBoost"
+#| label: tbl-xgb_best
+
+xgb_res %>% 
+  show_best("roc_auc") %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla XGBoost"
+#| label: fig-conf_mat_xgb
+
+xgb_best_param <- select_best(xgb_res, "roc_auc")
+
+xgb_final <- xgb_wf %>% 
+  finalize_workflow(xgb_best_param)
+
+xgb_fit <- xgb_final %>% 
+  fit(data = train)
+
+pred_xgb <- predict(xgb_fit, new_data = test)
+
+pred_xgb2 <- cbind(test, pred_xgb)
+
+pred_xgb2 %>%
+  conf_mat(truth = Rating, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC w podziale na klasy dla XGBoost"
+#| label: fig-roc_xgb
+
+pred_xgb_prob <- predict(xgb_fit, new_data = test, type = "prob")
+pred_xgb2_prob <- cbind(test, pred_xgb_prob)
+
+pred_xgb2_prob %>%
+  roc_curve(truth = Rating, .pred_1:.pred_5) %>% 
+  autoplot()+
+  theme_minimal()
+```
 
 ## kNN
 
-## Sieć neuronowa
-
 ```{r}
-library(keras3)
-library(tensorflow)
+knn <- nearest_neighbor(neighbors = tune(),
+                        weight_func = tune(),
+                        dist_power = tune()) %>% 
+  set_engine("kknn") %>% 
+  set_mode("classification")
 
-x_train <- train %>% select(-Rating)
-y_train <- train$Rating
-x_test <- test %>% select(-Rating)
-y_test <- test$Rating
- 
- 
-rnn <- keras_model_sequential() %>%
-  layer_embedding(input_dim = 10, output_dim = 5) %>%
-  layer_simple_rnn(units = 5, dropout = 0.4, recurrent_dropout = 0.4) %>%
-  layer_dense(units = 1, activation = "sigmoid")
+knn_param <- extract_parameter_set_dials(knn)
+knn_param <- finalize(knn_param, train)
+
+knn_wf <- workflow() %>% 
+  add_model(knn) %>% 
+  add_recipe(dane_rec)
+
+grid_knn <- grid_latin_hypercube(knn_param)
 ```
 
 ```{r}
-rnn %>% compile( 
-  optimizer = "adam", 
-  loss = "binary_crossentropy", 
-  metrics = c("accuracy") 
-)
- 
- 
-history <- rnn %>% fit( 
-  x_train,y_train, 
-  epochs = 10, 
-  batch_size = 32, 
-  validation_split = 0.2 
-)
- 
+registerDoParallel(cores = 4)
 
+knn_res <- knn_wf %>% 
+  tune_grid(resamples = res,
+            grid = grid_knn,
+            metrics = m)
 ```
 
 ```{r}
-model %>% evaluate(x_test,y_test)
+#| tbl-cap: "Trzy najlepsze parametry dla k - najbliższych sąsiadów"
+#| label: tbl-knn_best
+
+knn_res %>% 
+  show_best("roc_auc") %>% 
+  kable()
 ```
 
-# Porównanie modeli
+```{r}
+#| fig-cap: "Macierz pomyłek dla k - najbliższych sąsiadów"
+#| label: fig-conf_mat_knn
+
+knn_best_param <- select_best(knn_res, "roc_auc")
+
+knn_final <- knn_wf %>% 
+  finalize_workflow(knn_best_param)
+
+knn_fit <- knn_final %>% 
+  fit(data = train)
+
+pred_knn <- predict(knn_fit, new_data = test)
+
+pred_knn2 <- cbind(test, pred_knn)
+
+pred_knn2 %>%
+  conf_mat(truth = Rating, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC w podziale na klasy dla k - najbliższych sąsiadów"
+#| label: fig-roc_knn
+
+pred_knn_prob <- predict(knn_fit, new_data = test, type = "prob")
+pred_knn2_prob <- cbind(test, pred_knn_prob)
+
+pred_knn2_prob %>%
+  roc_curve(truth = Rating, .pred_1:.pred_5) %>% 
+  autoplot()+
+  theme_minimal()
+```
+
+## Metoda wektorów nośnych
+
+```{r}
+library(e1071)
+svm <- svm_poly(cost = tune(),
+                degree = tune(),
+                scale_factor = tune(),
+                margin = tune()) %>% 
+  set_engine("kernlab") %>% 
+  set_mode("classification")
+
+svm_param <- extract_parameter_set_dials(svm)
+svm_param <- finalize(svm_param, train)
+
+svm_wf <- workflow() %>% 
+  add_model(svm) %>% 
+  add_recipe(dane_rec)
+
+grid_svm <- grid_latin_hypercube(svm_param)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+svm_res <- svm_wf %>% 
+  tune_grid(resamples = res,
+            grid = grid_svm,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla SVM"
+#| label: tbl-svm_best
+
+svm_res %>% 
+  show_best("roc_auc") %>% 
+  kable()
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla SVM"
+#| label: fig-conf_mat_svm
+
+svm_best_param <- select_best(svm_res, "roc_auc")
+
+svm_final <- svm_wf %>% 
+  finalize_workflow(svm_best_param)
+
+svm_fit <- svm_final %>% 
+  fit(data = train)
+
+pred_svm <- predict(svm_fit, new_data = test)
+
+pred_svm2 <- cbind(test, pred_svm)
+
+pred_svm2 %>%
+  conf_mat(truth = Rating, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC w podziale na klasy dla SVM"
+#| label: fig-roc_svm
+
+pred_svm_prob <- predict(svm_fit, new_data = test, type = "prob")
+pred_svm2_prob <- cbind(test, pred_svm_prob)
+
+pred_svm2_prob %>%
+  roc_curve(truth = Rating, .pred_1:.pred_5) %>% 
+  autoplot()+
+  theme_minimal()
+```
+
+```{r}
+#siec neuronowa
+#tokenizacja
+#W przypadku powyższych modeli przygotowanie zmiennej tekstowej odbywało się w #funkcji recipe. Zanim dane zostaną wprowadzone do sieci neuronowej, trzeba #odpowiednio przygotować zmienne, a konkretnie przeprowadzić tokenizację zmiennej #Review Text.
+#word_tokens = tokenize_words(dane$`Review Text`, lowercase = TRUE, simplify = TRUE, strip_numeric = TRUE, stopwords = "en")
+#kable(head(word_tokens, 3))
+```
+
+```{r}
+#model sieci
+#nn_split = dane %>% 
+ # filter(nchar(`Review Text`) >= 15) %>% 
+  #mutate(Rating = as.integer(Rating)) %>% 
+  #initial_split()
+
+#nn_train = training(nn_split)
+#nn_test = testing(nn_split)
+```
+
+```{r}
+#library(keras3)
+#library(tensorflow)
+
+#x_train <- train %>% select(-Rating)
+#y_train <- train$Rating
+#x_test <- test %>% select(-Rating)
+#y_test <- test$Rating
+
+#nn_train %>%
+#  mutate(n_words = tokenizers::count_words(`Review Text`)) %>%
+ # ggplot(aes(n_words)) +
+  #geom_bar() +
+  #labs(x = "Number of words per campaign blurb",
+       #y = "Number of campaign blurbs")
+
+#max_length = 60
+#max_words = 20
+
+#nn_rec = recipe(Rating ~ `Review Text`, data = nn_train) %>% 
+#  step_tokenize(`Review Text`) %>% 
+ # step_tokenfilter(`Review Text`, max_tokens = max_words) %>% 
+  #step_sequence_onehot(`Review Text`, sequence_length = max_length)
+
+
+#prep <-  prep(nn_rec)
+#train_nn <- bake(prep, new_data = NULL, composition = "matrix")
+ #dim(train_nn)
+ 
+#lstm_mod <- keras_model_sequential() %>%
+ # layer_embedding(input_dim = 61, output_dim = 32) %>%
+  #layer_lstm(units = 32) %>%
+  #layer_dense(units = 1, activation = "sigmoid")
+
+#lstm_mod
+
+#lstm_mod %>%
+ # compile(
+  #  optimizer = "adam",
+   # loss = "binary_crossentropy",
+    #metrics = c("accuracy")
+  #)
+
+#lstm_history <- lstm_mod %>%
+ # fit(
+  #  train_nn,
+   # nn_train$Rating,
+    #epochs = 30,
+    #validation_split = 0.2,
+    #batch_size = 512,
+    #verbose = FALSE
+  #)
+
+#lstm_history
+```
+
+```{r}
+#modellllll = keras_model_sequential() %>%   
+ # layer_dense(units = 64, activation = "relu", input_shape = 61) %>%
+ # layer_dense(units = 64, activation = "relu") %>%
+ # layer_dense(units = 61, activation = "softmax")
+
+#modellllll %>%
+#  compile(
+ #   optimizer = "adam",
+  #  loss = "binary_crossentropy",
+ #   metrics = c("accuracy")
+ # )
+
+#modellll_history = modellllll %>%
+  #fit(
+  #  train_nn,
+  #  nn_train$Rating,
+  #  epochs = 30,
+  #  validation_split = 0.2,
+  #  batch_size = 512,
+  #  verbose = FALSE
+ # )
+```
+
+```{r}
+#plot(lstm_history)
+```
+
+```{r}
+#rnn <- keras_model_sequential() %>%
+  #layer_embedding(input_dim = max_words + 1, output_dim = 15) %>%
+  #layer_simple_rnn(units = 5, dropout = 0.4, recurrent_dropout = 0.4) %>%
+ # layer_dense(units = 1, activation = "sigmoid")
+
+#rnn %>% compile( 
+  #optimizer = "adam", 
+  #loss = "binary_crossentropy", 
+ # metrics = c("accuracy") 
+#)
+ 
+ 
+#history <- rnn %>% fit( 
+  #x_train_pad,y_train_pad, 
+  #epochs = 10, 
+  #batch_size = 32, 
+ # validation_split = 0.2 
+#)
+```
+
+```{r}
+#model %>% evaluate(x_test,y_test)
+```
+
+## Porównanie modeli
+
+```{r}
+#| tbl-cap: "Porónanie modeli uczenia maszynowego"
+#| label: tbl-final_set
+
+final <- matrix(c(accuracy(pred_dt2, truth = Rating, estimate = .pred_class)$.estimate,
+    roc_auc(pred_dt2_prob, truth = Rating, .pred_1:.pred_5)$.estimate,
+    accuracy(pred_rf2, truth = Rating, estimate = .pred_class)$.estimate,
+    roc_auc(pred_rf2_prob, truth = Rating, .pred_1:.pred_5)$.estimate,
+    accuracy(pred_xgb2, truth = Rating, estimate = .pred_class)$.estimate,
+    roc_auc(pred_xgb2_prob, truth = Rating, .pred_1:.pred_5)$.estimate,
+    accuracy(pred_knn2, truth = Rating, estimate = .pred_class)$.estimate,
+    roc_auc(pred_knn2_prob, truth = Rating, .pred_1:.pred_5)$.estimate,
+    accuracy(pred_svm2, truth = Rating, estimate = .pred_class)$.estimate,
+    roc_auc(pred_svm2_prob, truth = Rating, .pred_1:.pred_5)$.estimate), ncol = 2, byrow = T)
+
+colnames(final) <- c("Accuracy", "AUC")
+rownames(final) <- c("Drzewo decyzyjne", "Las losowy", "Boosting", "k - najbliższych sąsiadów", "SVM")
+
+kable(data.frame(final))
+```
+
+XGBoost najlepiej wypada w końcowym porównaniu.
+
+# Modele - zmienna przewidywana Recommend Flag
+
+Ze względów na to, że zmienna `Rating` ma aż 5 klas, można spróbować przewidzieć zmienną dwuklasową - `Recommend Flag`. Może okazać się, że klasyfikacja na podstawie tekstu uda się lepiej w przypadku zmiennej objaśnianej binarnej.
+
+Modele budowane są na takiej samej zasadzie jak powyżej. Trzeba zmienić formułę w *recipe* oraz zmienną według której zastosowane jest losowanie warstwowe w podziale na zbiór treningowy i testowy.
+
+## Drzewo decyzyjne
+
+```{r}
+set.seed(2024)
+split2 <- initial_split(dane_modele, strata = `Recommend Flag`)
+train2 <- training(split2)
+test2 <- testing(split2)
+```
+
+```{r}
+res2 <- vfold_cv(train, v = 5, strata = `Recommend Flag`)
+m <- metric_set(f_meas, roc_auc, accuracy, sensitivity, specificity, recall, j_index)
+```
+
+```{r}
+dane_rec2 <- recipe(`Recommend Flag` ~ `Review Text`, data = train2) %>%
+  step_tokenize(`Review Text`) %>%
+  step_stopwords(`Review Text`, stopword_source = "stopwords-iso") %>%
+  step_tokenfilter(`Review Text`, max_tokens = 1000) %>%
+  step_tf(`Review Text`) %>%
+  step_normalize(all_predictors())
+```
+
+```{r}
+dt_wf2 <- workflow() %>% 
+  add_model(dt) %>% 
+  add_recipe(dane_rec2)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+dt_res2 <- dt_wf2 %>% 
+  tune_grid(resamples = res2,
+            grid = grid_dt,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla drzewa decyzyjnego"
+#| label: tbl-dt_best2
+
+dt_res2 %>% 
+  show_best("roc_auc") %>% 
+  kable()
+
+dt_best_param2 <- select_best(dt_res2, "roc_auc")
+```
+
+```{r}
+dt_final2 <- dt_wf2 %>% 
+  finalize_workflow(dt_best_param2)
+
+dt_fit2 <- dt_final2 %>% 
+  fit(data = train2)
+
+pred2_dt <- predict(dt_fit2, new_data = test2)
+pred2_dt2 <- cbind(test2, pred2_dt)
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla drzewa decyzyjnego"
+#| label: fig-conf_mat_dt2
+
+pred2_dt2 %>%
+  conf_mat(truth = `Recommend Flag`, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC dla drzewa decyzyjnego"
+
+pred2_dt_prob <- predict(dt_fit2, new_data = test2, type = "prob")
+pred2_dt2_prob <- cbind(test2, pred2_dt_prob)
+
+pred2_dt2_prob %>%
+  roc_curve(truth = `Recommend Flag`, .pred_0)%>%
+  autoplot()+ theme_minimal()
+```
+
+## Las losowy
+
+```{r}
+rf_wf2 <- workflow() %>% 
+  add_model(rf) %>% 
+  add_recipe(dane_rec2)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+rf_res2 <- rf_wf2 %>% 
+  tune_grid(resamples = res2,
+            grid = grid_rf,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla lasu losowego"
+#| label: tbl-rf_best2
+
+rf_res2 %>% 
+  show_best("roc_auc") %>% 
+  kable()
+
+rf_best_param2 <- select_best(rf_res2, "roc_auc")
+```
+
+```{r}
+rf_final2 <- rf_wf2 %>% 
+  finalize_workflow(rf_best_param2)
+
+rf_fit2 <- rf_final2 %>% 
+  fit(data = train2)
+
+pred2_rf <- predict(rf_fit2, new_data = test2)
+pred2_rf2 <- cbind(test2, pred2_rf)
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla lasu losowego"
+#| label: fig-conf_mat_rf2
+
+pred2_rf2 %>%
+  conf_mat(truth = `Recommend Flag`, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC dla lasu losowego"
+
+pred2_rf_prob <- predict(rf_fit2, new_data = test2, type = "prob")
+pred2_rf2_prob <- cbind(test2, pred2_rf_prob)
+
+pred2_rf2_prob %>%
+  roc_curve(truth = `Recommend Flag`, .pred_0)%>%
+  autoplot()+ theme_minimal()
+```
+
+## Boosting
+
+```{r}
+xgb_wf2 <- workflow() %>% 
+  add_model(xgb) %>% 
+  add_recipe(dane_rec2)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+xgb_res2 <- xgb_wf2 %>% 
+  tune_grid(resamples = res2,
+            grid = grid_xgb,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla XGBoost"
+#| label: tbl-xgb_best2
+
+xgb_res2 %>% 
+  show_best("roc_auc") %>% 
+  kable()
+
+xgb_best_param2 <- select_best(xgb_res2, "roc_auc")
+```
+
+```{r}
+xgb_final2 <- xgb_wf2 %>% 
+  finalize_workflow(xgb_best_param2)
+
+xgb_fit2 <- xgb_final2 %>% 
+  fit(data = train2)
+
+pred2_xgb <- predict(xgb_fit2, new_data = test2)
+pred2_xgb2 <- cbind(test2, pred2_xgb)
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla XGBoost"
+#| label: fig-conf_mat_xgb2
+
+pred2_xgb2 %>%
+  conf_mat(truth = `Recommend Flag`, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC dla XGBoost"
+
+pred2_xgb_prob <- predict(xgb_fit2, new_data = test2, type = "prob")
+pred2_xgb2_prob <- cbind(test2, pred2_xgb_prob)
+
+pred2_xgb2_prob %>%
+  roc_curve(truth = `Recommend Flag`, .pred_0)%>%
+  autoplot()+ theme_minimal()
+```
+
+## kNN
+
+```{r}
+knn_wf2 <- workflow() %>% 
+  add_model(knn) %>% 
+  add_recipe(dane_rec2)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+knn_res2 <- knn_wf2 %>% 
+  tune_grid(resamples = res2,
+            grid = grid_knn,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla k - najbliższych sąsiadów"
+#| label: tbl-knn_best2
+knn_res2 %>% 
+  show_best("roc_auc") %>% 
+  kable()
+
+knn_best_param2 <- select_best(knn_res2, "roc_auc")
+```
+
+```{r}
+knn_final2 <- knn_wf2 %>% 
+  finalize_workflow(knn_best_param2)
+
+knn_fit2 <- knn_final2 %>% 
+  fit(data = train2)
+
+pred2_knn <- predict(knn_fit2, new_data = test2)
+pred2_knn2 <- cbind(test2, pred2_knn)
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla k - najbliższych sąsiadów"
+#| label: fig-conf_mat_knn2
+
+pred2_knn2 %>%
+  conf_mat(truth = `Recommend Flag`, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC dla kNN"
+
+pred2_knn_prob <- predict(knn_fit2, new_data = test2, type = "prob")
+pred2_knn2_prob <- cbind(test2, pred2_knn_prob)
+
+pred2_knn2_prob %>%
+  roc_curve(truth = `Recommend Flag`, .pred_0)%>%
+  autoplot()+ theme_minimal()
+```
+
+## Metoda wektorów nośnych
+
+```{r}
+svm_wf2 <- workflow() %>% 
+  add_model(svm) %>% 
+  add_recipe(dane_rec2)
+```
+
+```{r}
+registerDoParallel(cores = 4)
+
+svm_res2 <- svm_wf2 %>% 
+  tune_grid(resamples = res2,
+            grid = grid_svm,
+            metrics = m)
+```
+
+```{r}
+#| tbl-cap: "Trzy najlepsze zestawy parametrów dla SVM"
+#| label: tbl-svm_best2
+
+svm_res2 %>% 
+  show_best("roc_auc") %>% 
+  kable()
+
+svm_best_param2 <- select_best(svm_res2, "roc_auc")
+```
+
+```{r}
+svm_final2 <- svm_wf2 %>% 
+  finalize_workflow(svm_best_param2)
+
+svm_fit2 <- svm_final2 %>% 
+  fit(data = train2)
+
+pred2_svm <- predict(svm_fit2, new_data = test2)
+pred2_svm2 <- cbind(test2, pred2_svm)
+```
+
+```{r}
+#| fig-cap: "Macierz pomyłek dla SVM"
+#| label: fig-conf_mat_svm2
+
+pred2_svm2 %>%
+  conf_mat(truth = `Recommend Flag`, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")+
+  scale_fill_gradient(low = "lightblue", high = "cadetblue")
+```
+
+```{r}
+#| fig-cap: "Krzywa ROC dla SVM"
+
+pred2_svm_prob <- predict(svm_fit2, new_data = test2, type = "prob")
+pred2_svm2_prob <- cbind(test2, pred2_svm_prob)
+
+pred2_svm2_prob %>%
+  roc_curve(truth = `Recommend Flag`, .pred_0)%>%
+  autoplot()+ theme_minimal()
+```
+
+## Porównanie modeli
+
+```{r}
+#| tbl-cap: "Porónanie modeli uczenia maszynowego"
+#| label: tbl-final_set2
+
+final2 <- matrix(c(accuracy(pred2_dt2, truth = `Recommend Flag`, estimate = .pred_class)$.estimate,
+    roc_auc(pred2_dt2_prob, truth = `Recommend Flag`, .pred_0)$.estimate,
+    accuracy(pred2_rf2, truth = `Recommend Flag`, estimate = .pred_class)$.estimate,
+    roc_auc(pred2_rf2_prob, truth = `Recommend Flag`, .pred_0)$.estimate,
+    accuracy(pred2_xgb2, truth = `Recommend Flag`, estimate = .pred_class)$.estimate,
+    roc_auc(pred2_xgb2_prob, truth = `Recommend Flag`, .pred_0)$.estimate,
+    accuracy(pred2_knn2, truth = `Recommend Flag`, estimate = .pred_class)$.estimate,
+    roc_auc(pred2_knn2_prob, truth = `Recommend Flag`, .pred_0)$.estimate,
+    accuracy(pred2_svm2, truth = `Recommend Flag`, estimate = .pred_class)$.estimate,
+    roc_auc(pred2_svm2_prob, truth = `Recommend Flag`, .pred_0)$.estimate), ncol = 2, byrow = T)
+
+colnames(final2) <- c("Accuracy", "AUC")
+rownames(final2) <- c("Drzewo decyzyjne", "Las losowy", "Boosting", "k - najbliższych sąsiadów", "SVM")
+
+kable(data.frame(final2))
+```
+
+XGBoost i las losowy dają nalepsze wyniki w klasyfikacji.
+
+# Wnioski
+
+Na podstawie zbudowanych modeli można stwierdzić, że przewidywanie ograniczonej zmiennej klasyfikacyjnej (binarnej) jest dużo bardziej efektywne i dokładne niż przewidywanie przynależności do pięciu klas. Modelem, który najlepiej radzi sobie z przewidywaniem na podstawie tekstu z tego zbioru danych jest XGBoost. Widać, że istnieje zależność między opinią, którą wystawia klient, a ostateczną oceną i ewentualną rekomendacją.
 
 # Źródła
 
